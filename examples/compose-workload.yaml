@@ -1,0 +1,6 @@
+services:
+  hello:
+    image: alpine:3.20
+    command: ["sh", "-c", "while true; do echo hello from dcd; sleep 5; done"]
+    labels:
+      deviceconnect.dev/managed: "true"

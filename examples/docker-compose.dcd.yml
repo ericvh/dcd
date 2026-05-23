@@ -1,0 +1,21 @@
+# Example: run the dcd driver in a container with access to the host Docker socket.
+services:
+  dcd:
+    build: ..
+    image: dcd:local
+    container_name: dcd-driver
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DEVICE_CONNECT_ALLOW_INSECURE: "true"
+      DCD_DEVICE_ID: docker-host-edge
+      DCD_TENANT: default
+    command:
+      - --sim
+    # Replace --sim with portal flags for production, e.g.:
+    #   - --portal
+    #   - --portal-credentials
+    #   - /creds/device.creds.json
+    #   - --nats-credentials-file
+    #   - /creds/device.creds.json

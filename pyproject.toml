@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dcd"
+version = "0.1.0"
+description = "Device Connect driver for Docker — provision and control containers over D2D or Portal"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Eric Van Hensbergen" }]
+keywords = ["device-connect", "docker", "containers", "iot", "edge"]
+dependencies = [
+  "device-connect-edge>=0.2.2",
+  "docker>=7.0",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.8",
+]
+
+[project.scripts]
+dcd = "dcd.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
