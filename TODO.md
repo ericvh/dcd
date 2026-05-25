@@ -2,11 +2,11 @@
 
 ## Near term
 
-- [ ] Integration test job with Docker-in-Docker (real `DockerEngineBackend`)
-- [ ] Stream `container_logs` via Device Connect events (follow mode)
-- [ ] `attach` / interactive TTY session RPC (or document as out of scope)
-- [ ] Validate `compose_up` with inline YAML on real Docker (CI service container)
-- [ ] Publish package to PyPI (`pip install dcd`)
+- [x] Integration test job with Docker-in-Docker (real `DockerEngineBackend`) — CI `docker-integration` job
+- [x] Stream `container_logs` via Device Connect events (follow mode) — `container_log_line` + `follow=true`
+- [x] `attach` / interactive TTY session RPC — documented out of scope (use `exec_in_container`)
+- [x] Validate `compose_up` with inline YAML on real Docker (CI service container)
+- [ ] Publish package to PyPI (`pip install dcd`) — deferred
 
 ## Portal / ops
 
@@ -26,9 +26,9 @@
 - [ ] Network create/connect RPCs
 - [ ] Volume management RPCs
 - [ ] Filter `list_containers` by label selector
-- [ ] Configurable `@periodic` interval from `DCD_STATE_POLL_HZ` (today fixed at 0.5s when hz > 0)
+- [x] Configurable state poll interval from `DCD_STATE_POLL_HZ` (replaces fixed 0.5s `@periodic`)
 
 ## Quality
 
-- [x] GitHub Actions CI (Python 3.12/3.13, ruff, pytest) — `.github/workflows/ci.yml`
-- [ ] Contract test against pinned `device-connect-edge` version matrix
+- [x] GitHub Actions CI (Python 3.12/3.13, ruff check + format, pytest) — `.github/workflows/ci.yml`
+- [x] Contract test against pinned `device-connect-edge` version matrix — `contract-matrix` job

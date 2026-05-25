@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from device_connect_edge.drivers import DeviceDriver, emit, periodic, rpc
+from device_connect_edge.drivers import DeviceDriver, emit, rpc
 from device_connect_edge.types import DeviceIdentity, DeviceStatus
 
 from dcd.docker_backend import DockerBackend, build_docker_backend
@@ -20,6 +21,9 @@ class DockerHostDriver(DeviceDriver):
 
     Exposes container CRUD, logs, exec, image pull, and compose up/down over
     the Device Connect mesh (D2D LAN or Portal-backed NATS).
+
+    Interactive attach/TTY sessions are out of scope; use ``exec_in_container``
+    for one-shot commands or follow logs via ``container_logs`` + events.
     """
 
     device_type = "docker_host"
@@ -42,6 +46,9 @@ class DockerHostDriver(DeviceDriver):
         self._connected = False
         self._docker_info: dict[str, Any] = {}
         self._last_container_states: dict[str, str] = {}
+        self._poll_task: asyncio.Task[None] | None = None
+        self._log_follow_tasks: dict[str, asyncio.Task[None]] = {}
+        self._log_follow_stops: dict[str, asyncio.Event] = {}
 
     @property
     def identity(self) -> DeviceIdentity:
@@ -63,14 +70,30 @@ class DockerHostDriver(DeviceDriver):
     async def connect(self) -> None:
         self._docker_info = await self._backend.ping()
         self._connected = True
+        if self._state_poll_hz > 0:
+            interval = max(0.1, 1.0 / self._state_poll_hz)
+            self._poll_task = asyncio.create_task(
+                self._poll_container_states_loop(interval),
+                name="dcd-state-poll",
+            )
         logger.info(
-            "Docker host driver connected (sim=%s version=%s)",
+            "Docker host driver connected (sim=%s version=%s poll_hz=%s)",
             self._simulate,
             self._docker_info.get("docker_version"),
+            self._state_poll_hz,
         )
 
     async def disconnect(self) -> None:
         self._connected = False
+        if self._poll_task is not None:
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            self._poll_task = None
+        for container_id in list(self._log_follow_tasks):
+            await self.stop_container_logs(container_id)
         self._last_container_states.clear()
         logger.info("Docker host driver disconnected")
 
@@ -83,6 +106,8 @@ class DockerHostDriver(DeviceDriver):
             "device_type": self.device_type,
             "simulate": self._simulate,
             "docker_host": self._docker_host,
+            "state_poll_hz": self._state_poll_hz,
+            "log_follow_active": list(self._log_follow_tasks.keys()),
             "docker": self._docker_info,
         }
 
@@ -160,10 +185,53 @@ class DockerHostDriver(DeviceDriver):
         container_id: str,
         tail: int = 100,
         since: str | None = None,
+        follow: bool = False,
     ) -> dict[str, Any]:
-        """Fetch container logs."""
+        """Fetch container logs, or start streaming via ``container_log_line`` events.
+
+        Args:
+            container_id: Container ID or name.
+            tail: Number of lines to return or seed a follow stream.
+            since: Optional RFC3339 timestamp for log start.
+            follow: When true, emit ``container_log_line`` events until
+                ``stop_container_logs`` is called.
+        """
+        if follow:
+            if container_id in self._log_follow_tasks:
+                return {
+                    "status": "success",
+                    "streaming": True,
+                    "container_id": container_id,
+                    "already_following": True,
+                }
+            task = asyncio.create_task(
+                self._follow_container_logs(container_id, tail=tail, since=since),
+                name=f"dcd-logs-{container_id}",
+            )
+            self._log_follow_tasks[container_id] = task
+            return {"status": "success", "streaming": True, "container_id": container_id}
+
         logs = await self._backend.container_logs(container_id, tail=tail, since=since)
         return {"status": "success", "container_id": container_id, "logs": logs}
+
+    @rpc()
+    async def stop_container_logs(self, container_id: str) -> dict[str, Any]:
+        """Stop a log follow stream started by ``container_logs(..., follow=true)``."""
+        stop = self._log_follow_stops.pop(container_id, None)
+        if stop is not None:
+            stop.set()
+        task = self._log_follow_tasks.pop(container_id, None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return {
+            "status": "success",
+            "container_id": container_id,
+            "stopped": task is not None or stop is not None,
+        }
 
     @rpc()
     async def exec_in_container(
@@ -243,9 +311,25 @@ class DockerHostDriver(DeviceDriver):
     ) -> None:
         """Emitted when a container transitions state."""
 
-    @periodic(interval=0.5)
-    async def _poll_container_states(self) -> None:
-        if not self._connected or self._state_poll_hz <= 0:
+    @emit()
+    async def container_log_line(
+        self,
+        container_id: str,
+        line: str,
+        stream: str = "stdout",
+    ) -> None:
+        """Emitted for each log line when ``container_logs`` is called with ``follow=true``."""
+
+    async def _poll_container_states_loop(self, interval: float) -> None:
+        try:
+            while self._connected:
+                await self._poll_container_states_once()
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+
+    async def _poll_container_states_once(self) -> None:
+        if not self._connected:
             return
         containers = await self._backend.list_containers(all_containers=True)
         for summary in containers:
@@ -259,3 +343,37 @@ class DockerHostDriver(DeviceDriver):
                     image=summary.image,
                 )
         self._last_container_states = {c.id: c.state for c in containers}
+
+    async def _follow_container_logs(
+        self,
+        container_id: str,
+        *,
+        tail: int,
+        since: str | None,
+    ) -> None:
+        stop = asyncio.Event()
+        self._log_follow_stops[container_id] = stop
+
+        async def on_line(stream: str, line: str) -> None:
+            await self.container_log_line(
+                container_id=container_id,
+                line=line,
+                stream=stream,
+            )
+
+        try:
+            await self._backend.stream_container_logs(
+                container_id,
+                tail=tail,
+                since=since,
+                stop=stop,
+                on_line=on_line,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Log follow failed for %s", container_id)
+            raise
+        finally:
+            self._log_follow_stops.pop(container_id, None)
+            self._log_follow_tasks.pop(container_id, None)

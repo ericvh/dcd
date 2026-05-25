@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,6 +106,18 @@ class DockerBackend(ABC):
         remove_volumes: bool = False,
     ) -> dict[str, Any]: ...
 
+    @abstractmethod
+    async def stream_container_logs(
+        self,
+        container_id: str,
+        *,
+        tail: int = 100,
+        since: str | None = None,
+        stop: asyncio.Event,
+        on_line: Callable[[str, str], Awaitable[None]],
+    ) -> None:
+        """Stream log lines to on_line(stream, line) until stop is set."""
+
 
 def _managed_labels(spec: ContainerProvisionSpec) -> dict[str, str]:
     labels = dict(spec.labels)
@@ -138,6 +151,7 @@ class DockerEngineBackend(DockerBackend):
         self._base_url = base_url
         self._timeout_s = timeout_s
         self._client: Any = None
+        self._inline_compose_dirs: dict[str, tempfile.TemporaryDirectory[str]] = {}
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -194,7 +208,9 @@ class DockerEngineBackend(DockerBackend):
             if spec.mem_limit:
                 host_config_kwargs["mem_limit"] = spec.mem_limit
 
-            host_config = client.api.create_host_config(**host_config_kwargs) if host_config_kwargs else None
+            host_config = (
+                client.api.create_host_config(**host_config_kwargs) if host_config_kwargs else None
+            )
 
             kwargs: dict[str, Any] = {
                 "image": spec.image,
@@ -245,7 +261,9 @@ class DockerEngineBackend(DockerBackend):
 
         return await asyncio.to_thread(_stop)
 
-    async def restart_container(self, container_id: str, *, timeout_s: int = 10) -> ContainerSummary:
+    async def restart_container(
+        self, container_id: str, *, timeout_s: int = 10
+    ) -> ContainerSummary:
         def _restart() -> ContainerSummary:
             container = self._get_client().containers.get(container_id)
             container.restart(timeout=timeout_s)
@@ -333,7 +351,7 @@ class DockerEngineBackend(DockerBackend):
         return await asyncio.to_thread(_list)
 
     async def compose_up(self, spec: ComposeProvisionSpec) -> dict[str, Any]:
-        return await asyncio.to_thread(_compose_up_sync, spec)
+        return await asyncio.to_thread(self._compose_up_sync, spec)
 
     async def compose_down(
         self,
@@ -343,11 +361,146 @@ class DockerEngineBackend(DockerBackend):
         remove_volumes: bool = False,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
-            _compose_down_sync,
+            self._compose_down_sync,
             project_dir,
             compose_file,
             remove_volumes,
         )
+
+    async def stream_container_logs(
+        self,
+        container_id: str,
+        *,
+        tail: int = 100,
+        since: str | None = None,
+        stop: asyncio.Event,
+        on_line: Callable[[str, str], Awaitable[None]],
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+
+        def _reader() -> None:
+            try:
+                container = self._get_client().containers.get(container_id)
+                for chunk in container.logs(
+                    stream=True,
+                    follow=True,
+                    tail=tail,
+                    since=since,
+                    stdout=True,
+                    stderr=True,
+                    timestamps=False,
+                ):
+                    if stop.is_set():
+                        break
+                    if isinstance(chunk, bytes):
+                        text = chunk.decode("utf-8", errors="replace")
+                    else:
+                        text = str(chunk)
+                    for line in text.splitlines():
+                        loop.call_soon_threadsafe(queue.put_nowait, ("stdout", line))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        reader = asyncio.to_thread(_reader)
+        try:
+            while not stop.is_set():
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except TimeoutError:
+                    continue
+                if item is None:
+                    break
+                stream, line = item
+                await on_line(stream, line)
+        finally:
+            await reader
+
+    def _compose_up_sync(self, spec: ComposeProvisionSpec) -> dict[str, Any]:
+        workdir: Path | None = None
+        compose_path: Path | None = None
+        temp_dir: tempfile.TemporaryDirectory[str] | None = None
+
+        if spec.compose_yaml:
+            temp_dir = tempfile.TemporaryDirectory(prefix="dcd-compose-")
+            workdir = Path(temp_dir.name)
+            compose_path = workdir / "compose.yaml"
+            compose_path.write_text(spec.compose_yaml, encoding="utf-8")
+            self._inline_compose_dirs[str(workdir)] = temp_dir
+            temp_dir = None
+        elif spec.project_dir:
+            workdir = Path(spec.project_dir).expanduser().resolve()
+            if spec.compose_file:
+                compose_path = workdir / spec.compose_file
+        else:
+            raise ValueError("compose_up requires project_dir or compose_yaml")
+
+        cmd = _compose_command()
+        if compose_path:
+            cmd.extend(["-f", str(compose_path)])
+        cmd.append("up")
+        if spec.detach:
+            cmd.append("-d")
+        if spec.pull:
+            cmd.append("--pull")
+        if spec.build:
+            cmd.append("--build")
+        if spec.remove_orphans:
+            cmd.append("--remove-orphans")
+        if spec.services:
+            cmd.extend(spec.services)
+
+        result = subprocess.run(
+            cmd,
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            if workdir is not None:
+                self._cleanup_inline_compose(str(workdir))
+            raise RuntimeError(result.stderr or result.stdout or "compose up failed")
+        return {
+            "status": "success",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "project_dir": str(workdir),
+        }
+
+    def _compose_down_sync(
+        self,
+        project_dir: str | None,
+        compose_file: str | None,
+        remove_volumes: bool,
+    ) -> dict[str, Any]:
+        if not project_dir:
+            raise ValueError("compose_down requires project_dir")
+        workdir = Path(project_dir).expanduser().resolve()
+        cmd = _compose_command()
+        if compose_file:
+            cmd.extend(["-f", str(workdir / compose_file)])
+        cmd.append("down")
+        if remove_volumes:
+            cmd.append("-v")
+        result = subprocess.run(
+            cmd,
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+        self._cleanup_inline_compose(str(workdir))
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or result.stdout or "compose down failed")
+        return {"status": "success", "stdout": result.stdout, "stderr": result.stderr}
+
+    def _cleanup_inline_compose(self, project_dir: str) -> None:
+        temp_dir = self._inline_compose_dirs.pop(project_dir, None)
+        if temp_dir is not None:
+            temp_dir.cleanup()
 
 
 @dataclass
@@ -422,7 +575,9 @@ class SimDockerBackend(DockerBackend):
         sim.logs.append(f"[sim] stopped {sim.name} (timeout={timeout_s})")
         return self._to_summary(sim)
 
-    async def restart_container(self, container_id: str, *, timeout_s: int = 10) -> ContainerSummary:
+    async def restart_container(
+        self, container_id: str, *, timeout_s: int = 10
+    ) -> ContainerSummary:
         sim = self._resolve(container_id)
         sim.status = "running"
         sim.state = "running"
@@ -466,7 +621,10 @@ class SimDockerBackend(DockerBackend):
         return {"status": "success", "image": image, "progress": ["Pull complete (simulated)"]}
 
     async def list_images(self) -> list[dict[str, Any]]:
-        return [{"id": f"sim-{i}", "tags": [img], "size": 0} for i, img in enumerate(sorted(self._images))]
+        return [
+            {"id": f"sim-{i}", "tags": [img], "size": 0}
+            for i, img in enumerate(sorted(self._images))
+        ]
 
     async def compose_up(self, spec: ComposeProvisionSpec) -> dict[str, Any]:
         service = (spec.services or ["app"])[0]
@@ -478,6 +636,7 @@ class SimDockerBackend(DockerBackend):
             "simulated": True,
             "services": spec.services or ["app"],
             "containers": [summary.model_dump()],
+            "project_dir": spec.project_dir or "/tmp/dcd-sim-compose",
         }
 
     async def compose_down(
@@ -487,12 +646,37 @@ class SimDockerBackend(DockerBackend):
         compose_file: str | None = None,
         remove_volumes: bool = False,
     ) -> dict[str, Any]:
+        del compose_file
         removed = []
         for cid, sim in list(self._containers.items()):
             if sim.name.startswith("compose-"):
                 del self._containers[cid]
                 removed.append(sim.name)
-        return {"status": "success", "simulated": True, "removed": removed, "remove_volumes": remove_volumes}
+        return {
+            "status": "success",
+            "simulated": True,
+            "removed": removed,
+            "remove_volumes": remove_volumes,
+        }
+
+    async def stream_container_logs(
+        self,
+        container_id: str,
+        *,
+        tail: int = 100,
+        since: str | None = None,
+        stop: asyncio.Event,
+        on_line: Callable[[str, str], Awaitable[None]],
+    ) -> None:
+        del since
+        sim = self._resolve(container_id)
+        lines = sim.logs[-tail:] if tail else sim.logs
+        for line in lines:
+            if stop.is_set():
+                return
+            await on_line("stdout", line)
+        while not stop.is_set():
+            await asyncio.sleep(0.2)
 
     def _resolve(self, container_id: str) -> _SimContainer:
         if container_id in self._containers:
@@ -516,7 +700,9 @@ class SimDockerBackend(DockerBackend):
         )
 
 
-def build_docker_backend(*, simulate: bool = False, docker_host: str | None = None) -> DockerBackend:
+def build_docker_backend(
+    *, simulate: bool = False, docker_host: str | None = None
+) -> DockerBackend:
     if simulate:
         return SimDockerBackend()
     return DockerEngineBackend(base_url=docker_host)
@@ -534,82 +720,3 @@ def _compose_command() -> list[str]:
     if shutil.which("docker"):
         return ["docker", "compose"]
     raise RuntimeError("docker compose CLI not found on PATH")
-
-
-def _compose_up_sync(spec: ComposeProvisionSpec) -> dict[str, Any]:
-    workdir: Path | None = None
-    compose_path: Path | None = None
-    temp_dir: tempfile.TemporaryDirectory[str] | None = None
-
-    try:
-        if spec.compose_yaml:
-            temp_dir = tempfile.TemporaryDirectory(prefix="dcd-compose-")
-            workdir = Path(temp_dir.name)
-            compose_path = workdir / "compose.yaml"
-            compose_path.write_text(spec.compose_yaml, encoding="utf-8")
-        elif spec.project_dir:
-            workdir = Path(spec.project_dir).expanduser().resolve()
-            if spec.compose_file:
-                compose_path = workdir / spec.compose_file
-        else:
-            raise ValueError("compose_up requires project_dir or compose_yaml")
-
-        cmd = _compose_command() + ["up"]
-        if spec.detach:
-            cmd.append("-d")
-        if spec.pull:
-            cmd.append("--pull")
-        if spec.build:
-            cmd.append("--build")
-        if spec.remove_orphans:
-            cmd.append("--remove-orphans")
-        if compose_path:
-            cmd.extend(["-f", str(compose_path)])
-        if spec.services:
-            cmd.extend(spec.services)
-
-        result = subprocess.run(
-            cmd,
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=600,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr or result.stdout or "compose up failed")
-        return {
-            "status": "success",
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "project_dir": str(workdir),
-        }
-    finally:
-        if temp_dir is not None:
-            temp_dir.cleanup()
-
-
-def _compose_down_sync(
-    project_dir: str | None,
-    compose_file: str | None,
-    remove_volumes: bool,
-) -> dict[str, Any]:
-    if not project_dir:
-        raise ValueError("compose_down requires project_dir")
-    workdir = Path(project_dir).expanduser().resolve()
-    cmd = _compose_command() + ["down"]
-    if remove_volumes:
-        cmd.append("-v")
-    if compose_file:
-        cmd.extend(["-f", str(workdir / compose_file)])
-    result = subprocess.run(
-        cmd,
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=300,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr or result.stdout or "compose down failed")
-    return {"status": "success", "stdout": result.stdout, "stderr": result.stderr}

@@ -61,7 +61,9 @@ def gather_cli_run_params(args: Namespace) -> DeviceConnectRunParams:
     allow_insecure = args.allow_insecure or env.allow_insecure
     simulate = args.sim or env.simulate
     credentials_file = resolve_portal_credentials_file(
-        explicit_path=args.portal_credentials or args.nats_credentials_file or env.nats_credentials_file,
+        explicit_path=args.portal_credentials
+        or args.nats_credentials_file
+        or env.nats_credentials_file,
         portal=portal,
         pattern=args.portal_credentials_glob or env.portal_credentials_glob,
         search_dir=args.portal_credentials_dir or env.portal_credentials_dir,

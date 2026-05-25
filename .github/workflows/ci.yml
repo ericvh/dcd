@@ -7,6 +7,29 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+
+      - name: Ruff check
+        run: ruff check src tests
+
+      - name: Ruff format
+        run: ruff format --check src tests
+
   unit-tests:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
@@ -28,8 +51,67 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev]"
 
-      - name: Ruff
-        run: ruff check src tests
+      - name: Unit tests (simulated Docker)
+        run: pytest -v --tb=short -m "not docker"
 
-      - name: Unit tests
-        run: pytest -v --tb=short
+  contract-matrix:
+    name: Contract (device-connect-edge ${{ matrix.edge-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        edge-version: ["0.2.2"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install with pinned device-connect-edge
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+          pip install "device-connect-edge==${{ matrix.edge-version }}"
+
+      - name: Contract tests
+        run: pytest -v --tb=short tests/test_contract_matrix.py tests/test_driver.py::test_runtime_exposes_contract_functions_and_events
+
+  docker-integration:
+    name: Docker Engine integration
+    runs-on: ubuntu-latest
+    services:
+      docker:
+        image: docker:27-dind
+        options: --privileged
+        ports:
+          - 2375:2375
+    env:
+      DOCKER_HOST: tcp://docker:2375
+      DOCKER_TLS_CERTDIR: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package and dev dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+
+      - name: Wait for Docker Engine
+        run: |
+          for i in $(seq 1 30); do
+            docker version && exit 0
+            sleep 2
+          done
+          exit 1
+
+      - name: Docker integration tests
+        run: pytest -v --tb=short -m docker

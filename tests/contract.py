@@ -14,6 +14,7 @@ REQUIRED_FUNCTIONS = frozenset(
         "restart_container",
         "remove_container",
         "container_logs",
+        "stop_container_logs",
         "exec_in_container",
         "pull_image",
         "list_images",
@@ -26,5 +27,9 @@ REQUIRED_FUNCTIONS = frozenset(
 REQUIRED_EVENTS = frozenset(
     {
         "container_state_changed",
+        "container_log_line",
     }
 )
+
+# Pinned in pyproject.toml; CI matrix may install other versions to verify compatibility.
+PINNED_DEVICE_CONNECT_EDGE = "0.2.2"

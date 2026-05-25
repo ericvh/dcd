@@ -26,9 +26,7 @@ def driver(
     captured_events: list[tuple[str, dict[str, Any]]],
 ) -> DockerHostDriver:
     host_driver = DockerHostDriver(backend=sim_backend, simulate=True)
-    host_driver.set_event_callback(
-        lambda name, payload: captured_events.append((name, payload))
-    )
+    host_driver.set_event_callback(lambda name, payload: captured_events.append((name, payload)))
     return host_driver
 
 

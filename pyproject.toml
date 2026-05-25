@@ -30,6 +30,9 @@ dcd = "dcd.__main__:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+  "docker: integration tests requiring a Docker Engine",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import pytest
 from device_connect_edge import DeviceRuntime
 from device_connect_edge.errors import FunctionInvocationError
@@ -117,12 +120,42 @@ async def test_restart_container(connected_driver: DockerHostDriver) -> None:
 
 
 async def test_compose_down_simulated(connected_driver: DockerHostDriver) -> None:
-    await connected_driver.invoke(
+    up = await connected_driver.invoke(
         "compose_up",
         spec={"compose_yaml": "services:\n  web:\n    image: nginx\n"},
     )
     down = await connected_driver.invoke(
         "compose_down",
-        project_dir="/tmp/unused-in-sim",
+        project_dir=up.get("project_dir", "/tmp/unused-in-sim"),
     )
     assert down["status"] == "success"
+
+
+async def test_follow_container_logs_emits_events(
+    connected_driver: DockerHostDriver,
+    captured_events: list[tuple[str, dict[str, Any]]],
+) -> None:
+    created = await connected_driver.invoke(
+        "provision_container",
+        spec={"image": "alpine:latest", "name": "log-follow"},
+    )
+    cid = created["container"]["id"]
+
+    start = await connected_driver.invoke(
+        "container_logs",
+        container_id=cid,
+        tail=5,
+        follow=True,
+    )
+    assert start["streaming"] is True
+
+    await asyncio.sleep(0.3)
+
+    log_events = [p for name, p in captured_events if name == "container_log_line"]
+    assert log_events
+    assert log_events[0]["container_id"] == cid
+
+    stop = await connected_driver.invoke("stop_container_logs", container_id=cid)
+    assert stop["stopped"] is True
+
+    await connected_driver.invoke("remove_container", container_id=cid, force=True)

@@ -32,7 +32,9 @@ async def test_get_container_by_name(backend: SimDockerBackend) -> None:
 async def test_remove_running_without_force_raises(backend: SimDockerBackend) -> None:
     from dcd.models import ContainerProvisionSpec
 
-    created = await backend.create_container(ContainerProvisionSpec(image="alpine:latest", name="running"))
+    created = await backend.create_container(
+        ContainerProvisionSpec(image="alpine:latest", name="running")
+    )
     with pytest.raises(ValueError, match="running"):
         await backend.remove_container(created.id, force=False)
 
@@ -40,7 +42,9 @@ async def test_remove_running_without_force_raises(backend: SimDockerBackend) ->
 async def test_compose_down_removes_compose_containers(backend: SimDockerBackend) -> None:
     from dcd.models import ComposeProvisionSpec
 
-    await backend.compose_up(ComposeProvisionSpec(compose_yaml="services:\n  app:\n    image: alpine\n"))
+    await backend.compose_up(
+        ComposeProvisionSpec(compose_yaml="services:\n  app:\n    image: alpine\n")
+    )
     result = await backend.compose_down()
     assert result["status"] == "success"
     assert result["simulated"] is True

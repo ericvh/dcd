@@ -67,15 +67,31 @@ dcd --portal --discovery-mode d2d ...
 
 ## Run in Docker
 
-Build and run with the host socket (see `examples/docker-compose.dcd.yml`):
+The image runs **dcd** against the **host** Docker Engine by mounting `docker.sock` (the container does not run Docker-in-Docker). The entrypoint checks that the socket is present unless `DCD_SIM=true`.
 
 ```bash
 docker build -t dcd:local .
-docker run --rm -it \
+docker run --rm -d \
+  --name dcd-driver \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e DEVICE_CONNECT_ALLOW_INSECURE=true \
-  dcd:local --device-id docker-host-edge --tenant dev
+  -e DCD_DEVICE_ID=docker-host-edge \
+  dcd:local
 ```
+
+Compose on the same machine: [`examples/docker-compose.dcd.yml`](examples/docker-compose.dcd.yml).
+
+## Deploy with Arm Topo
+
+The repo root [`compose.yaml`](compose.yaml) is a [Topo template](https://github.com/arm/topo-template-format) (`x-topo` metadata) for **Arm64** edge boards:
+
+```bash
+topo clone https://github.com/ericvh/dcd.git
+cd dcd
+topo deploy --target pi@raspberrypi.local
+```
+
+Topo builds the image, transfers it to the target, and starts the service with `docker.sock` mounted so dcd manages workloads on that host. Portal setup and security notes: [`deploy/topo.md`](deploy/topo.md).
 
 ## RPC reference
 
@@ -87,13 +103,19 @@ docker run --rm -it \
 | `get_container` | Inspect by ID or name |
 | `provision_container` | Create container from spec dict |
 | `start_container` / `stop_container` / `restart_container` / `remove_container` | Lifecycle |
-| `container_logs` | Tail logs |
-| `exec_in_container` | Run command in container |
+| `container_logs` | Tail logs (`follow=true` streams via events) |
+| `stop_container_logs` | Stop a log follow stream |
+| `exec_in_container` | Run one-shot command (no interactive attach/TTY) |
 | `pull_image` / `list_images` | Image operations |
 | `compose_up` / `compose_down` | Docker Compose projects |
 | `list_managed_containers` | Containers with `deviceconnect.dev/managed=true` |
 
-**Event:** `container_state_changed` — `container_id`, `name`, `previous_state`, `state`, `image`
+**Events:**
+
+- `container_state_changed` — `container_id`, `name`, `previous_state`, `state`, `image`
+- `container_log_line` — `container_id`, `line`, `stream` (when `container_logs` uses `follow=true`)
+
+Interactive **attach** sessions are not supported; use `exec_in_container` or log follow instead.
 
 ### Provision spec example
 
@@ -136,8 +158,10 @@ ruff check src tests
 
 GitHub Actions runs on every push to `main`, pull request, and manual **workflow_dispatch**:
 
-- **Ruff** lint (`src`, `tests`)
-- **pytest** on Python 3.12 and 3.13 (simulated Docker backend; no daemon required)
+- **Ruff** lint and format check (`src`, `tests`)
+- **Unit tests** on Python 3.12 and 3.13 (simulated Docker; `pytest -m "not docker"`)
+- **Contract matrix** — pinned `device-connect-edge` RPC/event surface
+- **Docker integration** — DinD job with real Engine (`pytest -m docker`)
 
 Workflow: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 

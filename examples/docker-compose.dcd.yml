@@ -1,7 +1,11 @@
-# Example: run the dcd driver in a container with access to the host Docker socket.
+# Run dcd on the same host as Docker Engine (docker.sock passthrough).
+# From repo root: docker compose -f examples/docker-compose.dcd.yml up -d --build
+
 services:
   dcd:
-    build: ..
+    build:
+      context: ..
+      dockerfile: Dockerfile
     image: dcd:local
     container_name: dcd-driver
     restart: unless-stopped
@@ -11,11 +15,15 @@ services:
       DEVICE_CONNECT_ALLOW_INSECURE: "true"
       DCD_DEVICE_ID: docker-host-edge
       DCD_TENANT: default
-    command:
-      - --sim
-    # Replace --sim with portal flags for production, e.g.:
-    #   - --portal
-    #   - --portal-credentials
-    #   - /creds/device.creds.json
-    #   - --nats-credentials-file
-    #   - /creds/device.creds.json
+    # Simulator only (no docker.sock required):
+    # environment:
+    #   DCD_SIM: "true"
+    # command: ["--sim"]
+
+    # Portal example — mount credentials and set:
+    # environment:
+    #   DEVICE_CONNECT_PORTAL: "true"
+    #   NATS_CREDENTIALS_FILE: /creds/device.creds.json
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+    #   - ${HOME}/.config/device-connect:/creds:ro

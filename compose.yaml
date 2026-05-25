@@ -1,0 +1,55 @@
+# Topo template: deploy dcd on an Arm64 edge host with access to that host's Docker Engine.
+#
+#   topo clone https://github.com/ericvh/dcd.git
+#   cd dcd
+#   topo deploy --target pi@edge
+#
+# See deploy/topo.md for Portal credentials and security notes.
+
+services:
+  dcd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DEVICE_ID: docker-host-edge
+        TENANT: default
+        ALLOW_INSECURE: "true"
+    image: dcd:topo
+    platform: linux/arm64
+    container_name: dcd-driver
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Portal: add a read-only creds mount, e.g.:
+      # - /home/pi/.config/device-connect:/creds:ro
+    environment:
+      # DEVICE_CONNECT_PORTAL: "true"
+      # NATS_CREDENTIALS_FILE: /creds/device.creds.json
+      # DEVICE_CONNECT_DISCOVERY_MODE: infra
+
+x-topo:
+  name: "Device Connect Docker host (dcd)"
+  description: |
+    Runs the dcd Device Connect driver in Docker on an edge board. The container
+    mounts the host docker.sock so agents on the mesh can provision and manage
+    sibling containers on the same Engine that deployed dcd.
+  features:
+    - docker
+    - device-connect
+  args:
+    DEVICE_ID:
+      description: Device Connect device id for this docker_host
+      required: false
+      default: docker-host-edge
+      example: pi-docker-1
+    TENANT:
+      description: Device Connect tenant namespace
+      required: false
+      default: default
+      example: production
+    ALLOW_INSECURE:
+      description: Set DEVICE_CONNECT_ALLOW_INSECURE (use true for D2D lab networks)
+      required: false
+      default: "true"
+      example: "false"

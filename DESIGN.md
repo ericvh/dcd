@@ -45,7 +45,7 @@ flowchart TB
 
 | Layer                 | Responsibility                                                     |
 | --------------------- | ------------------------------------------------------------------ |
-| `DockerHostDriver`    | `@rpc` / `@emit` / `@periodic`; maps Device Connect API to backend |
+| `DockerHostDriver`    | `@rpc` / `@emit`; state poll loop from `DCD_STATE_POLL_HZ` |
 | `DockerBackend`       | Abstract async Docker operations                                   |
 | `DockerEngineBackend` | [docker-py](https://docker-py.readthedocs.io/) against Engine API  |
 | `SimDockerBackend`    | In-memory simulator for tests and `--sim`                          |
@@ -89,12 +89,23 @@ See [tcd/DESIGN.md](../tcd/DESIGN.md) for the Topo CLI wrapper design.
 - Prefer portal-provisioned credentials over `ALLOW_INSECURE` outside development.
 - Labels (`deviceconnect.dev/managed`) help identify driver-created resources; they are not a security boundary.
 
+## Container and Topo deployment
+
+- **Dockerfile** — Python driver + `docker` / `compose` CLI; mount `/var/run/docker.sock` to control the host Engine.
+- **`compose.yaml`** — Topo template (`x-topo`) for `topo deploy` to Arm64 targets; build args set `DEVICE_ID`, `TENANT`, and D2D insecure mode.
+- **`deploy/topo.md`** — Portal credentials, stop/update, and security guidance.
+
 ## Deployment topologies
 
 1. **Bare metal edge host** — `dcd` on the gateway, local socket, D2D to robots on LAN.
 2. **Driver container** — `examples/docker-compose.dcd.yml`, socket bind-mount.
 3. **Remote engine** — `DOCKER_HOST` / `dcd --docker-host` pointing at TCP or SSH transport (Engine must be reachable from the driver process).
 
+## Log follow and attach
+
+- **`container_logs(follow=true)`** starts a background stream; each line is emitted as **`container_log_line`**. Call **`stop_container_logs`** to end the stream.
+- **Interactive attach / TTY** is intentionally **out of scope** — use **`exec_in_container`** for one-shot commands.
+
 ## Future work
 
-See [TODO.md](TODO.md). Highlights: attach/stream logs, follow compose project labels, remote image sync patterns inspired by Topo, integration tests against real Docker.
+See [TODO.md](TODO.md). Highlights: follow compose project labels, remote image sync patterns inspired by Topo, PyPI publish.

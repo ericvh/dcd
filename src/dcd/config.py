@@ -65,7 +65,9 @@ class DriverConfig:
                 or None
             ),
             allow_insecure=allow_insecure in {"1", "true", "yes"},
-            portal=_truthy(os.environ.get("DEVICE_CONNECT_PORTAL", os.environ.get("DCD_PORTAL", ""))),
+            portal=_truthy(
+                os.environ.get("DEVICE_CONNECT_PORTAL", os.environ.get("DCD_PORTAL", ""))
+            ),
             portal_credentials_glob=os.environ.get(
                 "PORTAL_CREDENTIALS_GLOB",
                 DEFAULT_PORTAL_CREDENTIALS_GLOB,
