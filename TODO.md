@@ -2,7 +2,7 @@
 
 ## Near term
 
-- [x] Integration test job with Docker-in-Docker (real `DockerEngineBackend`) — CI `docker-integration` job
+- [x] Integration test job with Docker-in-Docker (real `DockerEngineBackend`) — CI `docker-integration` DinD via `tcp://127.0.0.1:2375`
 - [x] Stream `container_logs` via Device Connect events (follow mode) — `container_log_line` + `follow=true`
 - [x] `attach` / interactive TTY session RPC — documented out of scope (use `exec_in_container`)
 - [x] Validate `compose_up` with inline YAML on real Docker (CI service container)
