@@ -80,21 +80,50 @@ jobs:
         run: pytest -v --tb=short tests/test_contract_matrix.py tests/test_driver.py::test_runtime_exposes_contract_functions_and_events
 
   docker-integration:
-    name: Docker Engine integration
+    name: Docker Engine integration (DinD)
     runs-on: ubuntu-latest
+    # Job runs on the host runner; DinD is a service container. Use localhost
+    # (not the service hostname) — see GitHub service container port mapping docs.
+    services:
+      docker:
+        image: docker:27-dind
+        env:
+          DOCKER_TLS_CERTDIR: ""
+        options: >-
+          --privileged
+          --health-cmd "docker info"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+        ports:
+          - 2375:2375
+    env:
+      DOCKER_HOST: tcp://127.0.0.1:2375
+      DOCKER_TLS_CERTDIR: ""
     steps:
       - uses: actions/checkout@v4
+
+      - name: Wait for Docker Engine (DinD)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 45); do
+            if docker info >/dev/null 2>&1; then
+              echo "Docker Engine ready after ${i} attempt(s)"
+              docker version
+              docker compose version
+              exit 0
+            fi
+            echo "Waiting for DinD on ${DOCKER_HOST} (${i}/45)..."
+            sleep 2
+          done
+          echo "Docker Engine did not become ready"
+          exit 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
-      - name: Verify Docker Engine
-        run: |
-          docker version
-          docker compose version
 
       - name: Install package and dev dependencies
         run: |
@@ -103,3 +132,8 @@ jobs:
 
       - name: Docker integration tests
         run: pytest -v --tb=short -m docker
+
+      - name: Cleanup integration test containers
+        if: always()
+        run: |
+          docker ps -aq --filter "name=dcd-it" | xargs -r docker rm -f || true
